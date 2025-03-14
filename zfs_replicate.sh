@@ -1,14 +1,14 @@
 #!/bin/bash
 #
 # --- Grundeinstellungen ---
-REMOTE="10.188.20.111"
+REMOTE="[Your_Server_IP_or_DNS]"
 RETENTION=5
 # ------- Ende Modify -------
 VERSION="20250314"
 # USAGE Variable mittels Here-Document
 USAGE=$(cat <<'EOF'
  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
- Skript zur Replikation der ZFS-Datensätze einer VM von pve1 auf pve2.
+ Skript zur Replikation der ZFS-Datensätze einer VM von lokaler PVE auf Remote PVE.
  Neben der automatischen Moduswahl kann der Modus nun auch explizit via Parameter
  übergeben werden:
     zfs_repliacte.sh  <VMID> full  -> Erzwingt eine FULL-Replikation (z.B. wöchentlich per Cronjob,
