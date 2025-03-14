@@ -1,5 +1,9 @@
 #!/bin/bash
 #
+# --- Grundeinstellungen ---
+REMOTE="10.188.20.111"
+RETENTION=5
+# ------- Ende Modify -------
 VERSION="20250314"
 # USAGE Variable mittels Here-Document
 USAGE=$(cat <<'EOF'
@@ -22,10 +26,14 @@ USAGE=$(cat <<'EOF'
  Optionen :
    -h, --help      Zeigt diese Hilfe an.
    -v, --version   Zeigt die Versionsnummer an.
+   -c, --clear     Löscht alle Replica-Snapshots im Pool.
  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
 EOF
 )
+
+output_dt() {
+  date '+%d/%m/%Y %H:%M:%S'
+}
 
 set -e
 set -o pipefail
@@ -49,6 +57,13 @@ if [[ "$1" == "-v" || "$1" == "--version" ]]; then
     exit 0
 fi
 
+if [[ "$1" == "-c" || "$1" == "--clear" ]]; then
+    echo "$VERSION"
+    echo "Clearing all Snapshots across the Pool, created by this script"
+    for snapshot in `zfs list -H -t snapshot| grep replica | cut -f 1`; do  sudo zfs destroy $snapshot; done
+    exit 0
+fi
+
 VMID="$1"
 
 # Optionaler zweiter Parameter: Replikationsmodus (full, inc oder del)
@@ -62,13 +77,9 @@ if [ "$#" -eq 2 ]; then
     fi
 fi
 
-# --- Grundeinstellungen ---
-REMOTE="10.188.20.111"
-RETENTION=5
+################## Main starts here ###############
 VM_CONFIG_FILE="/etc/pve/qemu-server/${VMID}.conf"
 LXC_CONFIG_FILE="/etc/pve/lxc/${VMID}.conf"
-# ------- Ende Modiy -------
-
 
 CONFIG_FILE=${VM_CONFIG_FILE}
 
@@ -169,7 +180,7 @@ echo "$QM_SNAP_LIST"
 
 
 # Lese alle Disk-Einträge (nur aus dem Hauptteil der Konfiguration, vor dem ersten "[") in ein Array
-readarray -t disk_lines < <(sed '/^\[/q' "${CONFIG_FILE}" | grep -E '^[[:space:]]*(scsi|sata|virtio|efidisk)[0-9]+:')
+readarray -t disk_lines < <(sed '/^\[/q' "${CONFIG_FILE}" | grep -E '^[[:space:]]*(scsi|sata|virtio|efidisk|tpmstate)[0-9]+:')
 
 # Debug: Zeige Anzahl gefundener Zeilen
 echo "Gefundene Disk-Einträge: ${#disk_lines[@]}"
@@ -183,9 +194,10 @@ for line in "${disk_lines[@]}"; do
          echo "Überspringe ungültigen Disk-Eintrag: $line"
          continue
     fi
-    if [[ "$disk_dataset" =~ ^local-zfs: ]]; then
-         disk_dataset=$(echo "$disk_dataset" | sed 's/^local-zfs:/rpool\/data\//')
-    fi
+#    if [[ "$disk_dataset" =~ ^local-zfs: ]]; then
+#         disk_dataset=$(echo "$disk_dataset" | sed 's/^local-zfs:/rpool\/data\//')
+#    fi
+    disk_dataset=$(echo "$disk_dataset" | sed 's/:/\//g')
     disk_label=$(basename "$disk_dataset")
     echo "------------------------------------------"
     echo "Verarbeite Disk: ${disk_dataset} (Label: ${disk_label})"
@@ -235,8 +247,6 @@ for line in "${disk_lines[@]}"; do
 
     echo "Lokale ZFS-Snapshot-Kette für ${disk_dataset} bleibt erhalten."
 done
-
-
 
 # --- Lokale QM-Snapshot-Kette verwalten (nur Snapshots mit "replicate-") ---
 echo "Verwalte lokale QM-Snapshot-Kette (nur Snapshots mit 'replicate-')..."
