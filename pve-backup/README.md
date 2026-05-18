@@ -1,36 +1,35 @@
 # PVE Host Config Tools
 
-Zwei Bash-Scripts zum Sichern und kontrollierten Wiederherstellen der
-Konfiguration eines Proxmox-VE-Hosts. Kein Hexenwerk, aber genau die
-Nervenarbeit, die einem nach einer Neuinstallation sonst graue Haare wachsen
-lässt: Netzwerk, Storage-Definitionen, VM-/CT-Configs, PCI-Passthrough-Gefrickel.
+Two Bash scripts for backing up and selectively restoring the configuration of
+a Proxmox VE host. No black magic — just the tedious legwork that otherwise
+hands you grey hairs after a reinstall: networking, storage definitions,
+VM/CT configs, and all that PCI-passthrough fiddling.
 
-| Script | Aufgabe |
+| Script | Purpose |
 |--------|---------|
-| `pve-config-backup.sh`  | Konfiguration in ein ZIP packen, optional per SSH wegschieben |
-| `pve-config-restore.sh` | ZIP holen, prüfen, entpacken und *gezielt* zurückspielen |
+| `pve-config-backup.sh`  | Pack the configuration into a ZIP, optionally ship it off via SSH |
+| `pve-config-restore.sh` | Fetch a ZIP, verify it, unpack it, and *selectively* restore paths |
 
-## Was das hier ist – und was nicht
+## What this is — and what it is not
 
-Diese Scripts sichern **Konfiguration**, kein vollwertiges Bare-Metal-Image.
-Gäste-Disks (VMs/CTs) sind **nicht** enthalten – dafür gibt es Proxmox Backup
-Server, `vzdump` oder ZFS `send`/`recv`. Wer ein bootfähiges Komplettabbild
-will, greift zu Clonezilla. Diese Tools retten die Einstellungen, nicht die
-Terabytes.
+These scripts back up **configuration**, not a full bare-metal image. Guest
+disks (VMs/CTs) are **not** included — that is the job of Proxmox Backup
+Server, `vzdump`, or ZFS `send`/`recv`. If you want a bootable full-system
+image, reach for Clonezilla. These tools rescue the settings, not the
+terabytes.
 
-> **`/etc/pve` ist das pmxcfs-Cluster-Dateisystem.** Dateien daraus werden
-> niemals blind auf einen frischen Host zurückgekippt. In einem Cluster
-> synchronisiert sich `/etc/pve` beim Rejoin ohnehin selbst. Das Archiv ist
-> als *Referenz* zum selektiven Kopieren gedacht – nicht als `unzip` mit
-> Vollgas.
+> **`/etc/pve` is the pmxcfs cluster filesystem.** Files from it are never
+> dumped blindly back onto a fresh host. In a cluster, `/etc/pve` resynchronises
+> itself on rejoin anyway. The archive is meant as a *reference* for selective
+> copying — not as `unzip` at full throttle.
 
-## Voraussetzungen
+## Requirements
 
-- Ein Proxmox-VE-Host (Debian-Basis), Ausführung als `root`
-- `zip` für das Backup, `unzip` für den Restore
-  - Falls nicht vorhanden: `apt-get install -y zip unzip`
-- `sqlite3` (optional) für den SQL-Dump der pmxcfs-Datenbank
-- SSH-Zugang zum Zielserver, falls Übertragung gewünscht
+- A Proxmox VE host (Debian-based), run as `root`
+- `zip` for backup, `unzip` for restore
+  - If missing: `apt-get install -y zip unzip`
+- `sqlite3` (optional) for the SQL dump of the pmxcfs database
+- SSH access to the target server if transfer is desired
 
 ## Installation
 
@@ -44,61 +43,61 @@ chmod +x pve-config-backup.sh pve-config-restore.sh
 
 ## `pve-config-backup.sh`
 
-Sammelt die relevanten Konfigurationsdateien, packt sie in ein ZIP-Archiv,
-erzeugt eine SHA-256-Prüfsumme und überträgt das Ganze optional per SSH.
+Collects the relevant configuration files, packs them into a ZIP archive,
+generates a SHA-256 checksum, and optionally transfers everything via SSH.
 
-### Sicherungsumfang
+### Backup scope
 
-Neben dem offensichtlichen `/etc/pve` wird auch das gesichert, was bei reinem
-`/etc/pve`-Kopieren gern vergessen wird: Netzwerk (`interfaces`),
-Boot-/IOMMU-Konfiguration (`grub`, `kernel/cmdline`, `modules`, `modprobe.d`),
-LVM, SSH-Host-Keys, APT-Repos, Cron sowie `passwd`/`shadow`/`group` plus
-`subuid`/`subgid` (wichtig für unprivilegierte LXC). Zusätzlich landen die
-pmxcfs-Datenbank (`config.db` als Rohdatei **und** SQL-Dump) sowie ein
-`BACKUP-MANIFEST.txt` mit Systeminventar im Archiv. Nicht vorhandene Pfade
-werden stillschweigend übersprungen.
+Beyond the obvious `/etc/pve`, it also captures what tends to be forgotten when
+you only copy `/etc/pve`: networking (`interfaces`), boot/IOMMU configuration
+(`grub`, `kernel/cmdline`, `modules`, `modprobe.d`), LVM, SSH host keys, APT
+repositories, cron, plus `passwd`/`shadow`/`group` and `subuid`/`subgid`
+(important for unprivileged LXC). On top of that, the pmxcfs database
+(`config.db` as a raw file **and** SQL dump) and a `BACKUP-MANIFEST.txt` with a
+system inventory end up in the archive. Non-existent paths are skipped
+silently.
 
-### CLI-Parameter
+### CLI parameters
 
-| Option | Beschreibung | Default |
-|--------|--------------|---------|
-| `-o, --output DATEI`   | Voller Pfad/Name der ZIP-Datei | `<tmpdir>/<prefix>-<host>-<timestamp>.zip` |
-| `-p, --prefix NAME`    | Dateinamen-Präfix | `pve-config` |
-| `-t, --tmpdir VERZ`    | Arbeits-/Ablageverzeichnis | `/tmp` |
-| `-d, --dest ZIEL`      | SSH-Ziel `user@host:/pfad/` | – (ohne Angabe nur lokal) |
-| `-P, --port PORT`      | SSH-Port | `22` |
-| `-i, --identity DATEI` | SSH-Private-Key | – |
-| `-r, --rsync`          | `rsync` statt `scp` verwenden | aus |
-| `-e, --extra PFAD`     | Zusätzlicher Pfad (mehrfach nutzbar) | – |
-| `-k, --keep-local`     | Lokale ZIP nach Transfer behalten | aus |
-| `-n, --no-transfer`    | Nur lokal sichern | aus |
-| `-q, --quiet`          | Nur Warnungen/Fehler ausgeben | aus |
-| `-h, --help`           | Hilfe anzeigen | – |
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-o, --output FILE`    | Full path/name of the ZIP file | `<tmpdir>/<prefix>-<host>-<timestamp>.zip` |
+| `-p, --prefix NAME`    | Filename prefix | `pve-config` |
+| `-t, --tmpdir DIR`     | Working/output directory | `/tmp` |
+| `-d, --dest TARGET`    | SSH target `user@host:/path/` | – (without it, local only) |
+| `-P, --port PORT`      | SSH port | `22` |
+| `-i, --identity FILE`  | SSH private key | – |
+| `-r, --rsync`          | Use `rsync` instead of `scp` | off |
+| `-e, --extra PATH`     | Additional path (repeatable) | – |
+| `-k, --keep-local`     | Keep local ZIP after transfer | off |
+| `-n, --no-transfer`    | Back up locally only | off |
+| `-q, --quiet`          | Print warnings/errors only | off |
+| `-h, --help`           | Show help | – |
 
-### Beispiele
+### Examples
 
 ```bash
-# 1) Nur lokales Backup nach /tmp (Standard-Dateiname)
+# 1) Local backup to /tmp only (default filename)
 ./pve-config-backup.sh -n
 
-# 2) Backup erstellen und per scp auf den Backup-Host schieben
+# 2) Create a backup and push it to the backup host via scp
 ./pve-config-backup.sh -d backup@nas.local:/srv/pve-backups/
 
-# 3) Eigener Key, Port 2222, rsync, zwei zusätzliche Pfade
+# 3) Custom key, port 2222, rsync, two extra paths
 ./pve-config-backup.sh -d root@10.0.0.9:/backups/ -P 2222 -i ~/.ssh/backup \
                        -r -e /etc/iscsi -e /root/scripts
 
-# 4) Fester Dateiname und eigenes Ablageverzeichnis
+# 4) Fixed filename and custom output directory
 ./pve-config-backup.sh -o /mnt/nas/pve01-config.zip -n
 
-# 5) Lokale Kopie nach dem Transfer behalten
+# 5) Keep the local copy after transfer
 ./pve-config-backup.sh -d backup@nas.local:/srv/pve-backups/ -k
 ```
 
-### Automatisierung (Cron)
+### Automation (cron)
 
-Tägliches Backup um 02:15 Uhr, ältere Archive auf dem Zielhost aufräumt man
-besser dort separat:
+Daily backup at 02:15. Pruning old archives is better handled on the target
+host separately:
 
 ```cron
 15 2 * * * root /opt/pve-tools/pve-config-backup.sh -d backup@nas.local:/srv/pve-backups/ -q
@@ -108,94 +107,93 @@ besser dort separat:
 
 ## `pve-config-restore.sh`
 
-Holt ein Archiv (lokal oder per SSH), verifiziert die Prüfsumme, entpackt es
-und stellt – **nur auf ausdrückliche Anweisung** – einzelne Pfade wieder her.
+Fetches an archive (local or via SSH), verifies the checksum, unpacks it, and —
+**only when explicitly told to** — restores individual paths.
 
-> **Der Default-Modus restauriert nichts.** Er entpackt und zeigt nur an. Das
-> ist Absicht: Ein Restore-Script, das ungefragt `/etc` überschreibt, ist kein
-> Werkzeug, sondern eine Falle. Erst mit `--apply` wird tatsächlich etwas
-> zurückgespielt – und auch dann wird der bestehende Stand vorher nach
-> `<ziel>.bak-<timestamp>` gesichert.
+> **The default mode restores nothing.** It only unpacks and displays. That is
+> deliberate: a restore script that overwrites `/etc` unprompted is not a tool,
+> it is a trap. Only `--apply` actually puts something back — and even then the
+> existing state is first saved to `<target>.bak-<timestamp>`.
 
-### CLI-Parameter
+### CLI parameters
 
-| Option | Beschreibung | Default |
-|--------|--------------|---------|
-| `-i, --input DATEI`    | Lokales ZIP-Archiv | – |
-| `-f, --from SSH-QUELLE`| Archiv per SSH holen, `user@host:/pfad/x.zip` | – |
-| `-P, --port PORT`      | SSH-Port für `--from` | `22` |
-| `-I, --identity DATEI` | SSH-Private-Key für `--from` | – |
-| `-t, --tmpdir VERZ`    | Arbeitsverzeichnis | `/tmp` |
-| `-l, --list`           | Archivinhalt auflisten und beenden | aus |
-| `-D, --diff`           | Archiv gegen das laufende System diffen | aus |
-| `-a, --apply PFAD`     | Diesen Pfad wiederherstellen (mehrfach nutzbar) | – |
-| `--allow-pve`          | `--apply` auch für Pfade unter `/etc/pve` erlauben | aus |
-| `--no-checksum`        | Prüfsummen-Check überspringen (nicht empfohlen) | aus |
-| `-y, --yes`            | Rückfragen vor dem Wiederherstellen unterdrücken | aus |
-| `-q, --quiet`          | Nur Warnungen/Fehler ausgeben | aus |
-| `-h, --help`           | Hilfe anzeigen | – |
+| Option | Description | Default |
+|--------|-------------|---------|
+| `-i, --input FILE`     | Local ZIP archive | – |
+| `-f, --from SSH-SRC`   | Fetch archive via SSH, `user@host:/path/x.zip` | – |
+| `-P, --port PORT`      | SSH port for `--from` | `22` |
+| `-I, --identity FILE`  | SSH private key for `--from` | – |
+| `-t, --tmpdir DIR`     | Working directory | `/tmp` |
+| `-l, --list`           | List archive contents and exit | off |
+| `-D, --diff`           | Diff the archive against the running system | off |
+| `-a, --apply PATH`     | Restore this path (repeatable) | – |
+| `--allow-pve`          | Allow `--apply` for paths under `/etc/pve` | off |
+| `--no-checksum`        | Skip the checksum check (not recommended) | off |
+| `-y, --yes`            | Suppress confirmation prompts before restoring | off |
+| `-q, --quiet`          | Print warnings/errors only | off |
+| `-h, --help`           | Show help | – |
 
-Quelle ist **genau eine** von `--input` oder `--from`.
+The source is **exactly one** of `--input` or `--from`.
 
-### Beispiele
+### Examples
 
 ```bash
-# 1) Archiv nur entpacken und anschauen (verändert nichts)
+# 1) Just unpack and inspect the archive (changes nothing)
 ./pve-config-restore.sh -i /tmp/pve-config-pve01-20260518-021500.zip
 
-# 2) Archivinhalt auflisten
+# 2) List archive contents
 ./pve-config-restore.sh -i ./pve-config-pve01.zip -l
 
-# 3) Archiv vom Backup-Host holen und gegen das System diffen
+# 3) Fetch the archive from the backup host and diff it against the system
 ./pve-config-restore.sh -f backup@nas.local:/srv/pve-backups/pve-config-pve01.zip -D
 
-# 4) Netzwerk- und GRUB-Konfiguration gezielt zurückspielen (ohne Rückfrage)
+# 4) Selectively restore networking and GRUB config (no prompts)
 ./pve-config-restore.sh -i ./pve-config-pve01.zip \
                         -a /etc/network/interfaces -a /etc/default/grub -y
 
-# 5) Einen /etc/pve-Pfad zurückspielen – nur wenn du WIRKLICH weisst, was du tust
+# 5) Restore an /etc/pve path — only if you REALLY know what you are doing
 ./pve-config-restore.sh -i ./pve-config-pve01.zip \
                         -a /etc/pve/storage.cfg --allow-pve
 ```
 
-### Nach dem Restore
+### After a restore
 
-Betroffene Dienste neu starten – das Script erinnert daran, je nach
-zurückgespieltem Pfad:
+Restart the affected services — the script reminds you, depending on which path
+was restored:
 
 ```bash
-systemctl restart networking      # nach Netzwerk-Restore
-update-grub                       # nach GRUB-Restore
-systemctl restart pve-cluster     # nach /etc/pve-Restore
+systemctl restart networking      # after a networking restore
+update-grub                       # after a GRUB restore
+systemctl restart pve-cluster     # after an /etc/pve restore
 ```
 
 ---
 
-## Typischer Workflow
+## Typical workflow
 
 ```text
-  Quell-Host                          Backup-Server                Ziel-Host
+  Source host                         Backup server               Target host
  ┌────────────┐   pve-config-backup   ┌──────────────┐   restore   ┌──────────┐
- │ /etc/pve   │ ───────scp/rsync────► │  *.zip        │ ──────────► │ frisches │
- │ /etc/...   │      + .sha256        │  *.zip.sha256 │   -i / -f   │ PVE      │
+ │ /etc/pve   │ ───────scp/rsync────► │  *.zip        │ ──────────► │  fresh   │
+ │ /etc/...   │      + .sha256        │  *.zip.sha256 │   -i / -f   │  PVE     │
  └────────────┘                       └──────────────┘             └──────────┘
-                                                              dann gezielt -a
+                                                              then selective -a
 ```
 
-1. Auf dem Quell-Host: `pve-config-backup.sh -d backup@host:/pfad/`
-2. Im Ernstfall auf dem neuen Host: `pve-config-restore.sh -f backup@host:/pfad/x.zip -D`
-   (erst diffen, schauen, *dann* mit `-a` selektiv zurückspielen)
+1. On the source host: `pve-config-backup.sh -d backup@host:/path/`
+2. In an emergency, on the new host: `pve-config-restore.sh -f backup@host:/path/x.zip -D`
+   (diff first, look, *then* selectively restore with `-a`)
 
-## Restore-Strategie – kurz und schmerzlos
+## Restore strategy — short and painless
 
-- **Erst `--diff`, dann `--apply`.** Sehen, was abweicht, bevor man etwas anfasst.
-- **NIC-Namen prüfen.** Neue Hardware = neue Interface-Namen. `/etc/network/interfaces`
-  aus dem Archiv passt dann eventuell nicht 1:1.
-- **`/etc/pve` ist Sonderzone.** Im Cluster regelt sich das beim Rejoin selbst;
-  einzelne Dateien nur mit `--allow-pve` und wachem Verstand.
-- **Das beste Backup ist ein getestetes.** Restore einmal auf einem Wegwerf-Host
-  durchspielen, bevor der Ernstfall es tut.
+- **Diff before apply.** See what differs before you touch anything.
+- **Check NIC names.** New hardware means new interface names. The
+  `/etc/network/interfaces` from the archive may then not match 1:1.
+- **`/etc/pve` is a special zone.** In a cluster it sorts itself out on rejoin;
+  individual files only with `--allow-pve` and a clear head.
+- **The best backup is a tested one.** Run the restore once on a throwaway host
+  before the real emergency does it for you.
 
-## Lizenz
+## License
 
-Nach Belieben anpassen – z.B. MIT.
+Adjust as you like — e.g. MIT.
