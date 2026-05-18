@@ -2,6 +2,8 @@
 Scripts to tune and replicate Proxmox PVE hosts
 
 # zfs_replicate.sh
-Script inspired by my colleague Patrick (#Striker2102) to replicate a VM or LXC to a second node.
-You have to add the second server for ssh remote with ssh-copy-id to allow script to make changes on second node
 
+Replication of ZFS datasets belonging to a Proxmox VE guest (VM or LXC
+container) from a local Proxmox host to a remote Proxmox host.
+Script inspired by my colleague Patrick (#Striker2102) to replicate a VM or LXC to a second node.
+[a /zfs_replicate/README.md ]
