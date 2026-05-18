@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# zfs_replicate.sh  Version 2.5
+# zfs_replicate.sh
 #
 # Script for replicating ZFS datasets of a VM/CT from a local Proxmox VE
 # to a remote Proxmox VE.
@@ -74,7 +74,19 @@
 #   * NEW:  -v/--version now prints the framed version banner (print_banner)
 #           instead of the bare version string.
 #
-# Author: Kilowatt  (v2.1 - v2.5 revisions added)
+# Changelog 2.5 -> 2.6
+#   * NEW:  Transfer verification before VM config is copied.
+#           After every ZFS send/receive the script confirms the snapshot
+#           (or dataset for mirror mode) actually exists on the remote host.
+#           Failed disks increment TRANSFER_ERRORS. If any disk failed,
+#           update_remote_config is unconditionally skipped and the run exits 1.
+#           A broken remote state (disks missing, config present) is no longer
+#           possible.
+#   * FIX:  Missing local ZFS snapshot in replicate_disk() is now a counted
+#           error instead of a silent warning.
+#   * FIX:  Missing local dataset in mirror mode is now a counted error.
+#
+# Author: Kilowatt  (v2.1 - v2.6 revisions added)
 # Date:   17.05.2026
 #
 
@@ -82,7 +94,7 @@
 REMOTE="10.188.20.111"
 REMOTE_PORT=22
 RETENTION=5
-VERSION="260517_2.5"
+VERSION="260517_2.6"
 LOCKDIR="/var/lock"
 
 # --- ZFS Pools ---
@@ -431,6 +443,34 @@ remote_purge_replica_snapshots() {
     done" || log_msg "No remote snapshots to delete or an error occurred."
 }
 
+# --- Verify a snapshot exists on the remote host ---
+# Returns 0 on success, 1 if the snapshot is absent. Never exits the script
+# directly; the caller decides whether to treat the result as a fatal error.
+verify_remote_snapshot() {
+    local remote_ds="$1" snap="$2"
+    log_msg "  Verifying ${remote_ds}@${snap} on remote..."
+    if $SSH root@"${REMOTE}" "zfs list -H -o name -t snapshot '${remote_ds}@${snap}'" >/dev/null 2>&1; then
+        log_msg "  Verify OK: ${remote_ds}@${snap} confirmed on remote."
+        return 0
+    else
+        log_msg "  Verify FAILED: ${remote_ds}@${snap} not found on remote!"
+        return 1
+    fi
+}
+
+# --- Verify a dataset exists on the remote host (used by mirror mode) ---
+verify_remote_dataset() {
+    local remote_ds="$1"
+    log_msg "  Verifying dataset ${remote_ds} on remote..."
+    if $SSH root@"${REMOTE}" "zfs list -H -o name '${remote_ds}'" >/dev/null 2>&1; then
+        log_msg "  Verify OK: dataset ${remote_ds} confirmed on remote."
+        return 0
+    else
+        log_msg "  Verify FAILED: dataset ${remote_ds} not found on remote!"
+        return 1
+    fi
+}
+
 # --- Send a FULL snapshot of a dataset to the remote host ---
 # Arg 1: local dataset path, Arg 2: remote dataset path (receive target).
 send_full() {
@@ -453,13 +493,13 @@ replicate_disk() {
     log_msg "------------------------------------------"
     log_msg "Processing disk: ${disk_dataset} -> ${remote_ds} (Label: ${disk_label})"
 
-    # Check if local ZFS snapshot exists
+    # Check if local ZFS snapshot exists.
     if ! zfs list -H -o name -t snapshot "${disk_dataset}@${NEW_SNAP}" > /dev/null 2>&1; then
-         log_msg "Warning: Local ZFS snapshot ${disk_dataset}@${NEW_SNAP} does not exist. (Disk: ${disk_label})"
+         log_msg "Error: Local ZFS snapshot ${disk_dataset}@${NEW_SNAP} does not exist. (Disk: ${disk_label})"
+         TRANSFER_ERRORS=$(( TRANSFER_ERRORS + 1 ))
          return
-    else
-         log_msg "Local ZFS snapshot ${disk_dataset}@${NEW_SNAP} exists; proceeding."
     fi
+    log_msg "Local ZFS snapshot ${disk_dataset}@${NEW_SNAP} exists; proceeding."
 
     if [ "$NEW_TYPE" = "full" ]; then
          log_msg "FULL mode: Removing all remote snapshots with prefix 'replicate-' for ${remote_ds}..."
@@ -491,6 +531,14 @@ replicate_disk() {
          fi
     fi
 
+    # Verify the snapshot landed on the remote side before declaring success.
+    # This catches "pipeline exited 0 but data never arrived" edge cases.
+    if ! verify_remote_snapshot "$remote_ds" "$NEW_SNAP"; then
+        TRANSFER_ERRORS=$(( TRANSFER_ERRORS + 1 ))
+        return
+    fi
+
+    log_msg "Disk ${disk_dataset} replicated and verified successfully."
     log_msg "Local ZFS snapshot chain for ${disk_dataset} is preserved."
 }
 
@@ -521,7 +569,7 @@ mirror_offline_vm() {
     fi
     log_msg "Disks to mirror: ${DISK_DATASETS[*]}"
 
-    # 3. snapshot -> full send -> destroy transient snapshot, per dataset.
+    # 3. snapshot -> full send -> verify -> destroy transient snapshot, per dataset.
     local ds send_flags remote_ds
     for ds in "${DISK_DATASETS[@]}"; do
         remote_ds=$(remote_dataset "$ds")
@@ -529,7 +577,8 @@ mirror_offline_vm() {
         log_msg "Mirroring ${ds} -> ${remote_ds}"
 
         if ! zfs list -H -o name "$ds" > /dev/null 2>&1; then
-            log_msg "Warning: local dataset ${ds} missing, skipping."
+            log_msg "Error: local dataset ${ds} missing, skipping."
+            TRANSFER_ERRORS=$(( TRANSFER_ERRORS + 1 ))
             continue
         fi
 
@@ -543,13 +592,29 @@ mirror_offline_vm() {
             zfs send -p $send_flags "${ds}@${mirror_snap}" | $SSH root@"${REMOTE}" zfs receive -F "${remote_ds}"
         fi
 
+        # Verify the dataset exists on the remote before cleaning up.
+        # The transient snapshot is gone after cleanup, so verify first.
+        if ! verify_remote_dataset "$remote_ds"; then
+            TRANSFER_ERRORS=$(( TRANSFER_ERRORS + 1 ))
+            log_msg "Error: ${remote_ds} not confirmed on remote. Leaving transient snapshot for inspection."
+            continue
+        fi
+
         # Clean up the transient snapshot on both sides.
         zfs destroy "${ds}@${mirror_snap}"
         $SSH root@"${REMOTE}" "zfs destroy ${remote_ds}@${mirror_snap} 2>/dev/null || true"
         log_msg "Done: ${ds}"
     done
 
-    # 4. Push the config, then exit. No QM chain, no retention juggling.
+    # 4. Only push the config if every disk transferred and verified successfully.
+    if [ "$TRANSFER_ERRORS" -gt 0 ]; then
+        log_msg "=========================================="
+        log_msg "ERROR: ${TRANSFER_ERRORS} disk(s) failed transfer or verification."
+        log_msg "       VM configuration NOT copied to remote host."
+        log_msg "       Fix the failed disks and retry before starting the replica."
+        exit 1
+    fi
+
     update_remote_config
     log_msg "=========================================="
     log_msg "Offline mirror of VMID $VMID completed successfully."
@@ -607,6 +672,10 @@ set -o pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Uncomment the next line for step-by-step debugging:
 # set -x
+
+# Counts disks that failed transfer or remote verification.
+# update_remote_config is skipped if this is non-zero.
+TRANSFER_ERRORS=0
 
 # --- Parse Command-Line Options ---
 LOGFILE=""
@@ -728,7 +797,16 @@ done
 # --- Manage Local QM Snapshot Chain ---
 manage_local_qm_chain
 
-# --- Update Remote VM Configuration (only on full runs, as documented) ---
+# --- Guard: only update the remote config if all disks verified successfully ---
+if [ "$TRANSFER_ERRORS" -gt 0 ]; then
+    log_msg "=========================================="
+    log_msg "ERROR: ${TRANSFER_ERRORS} disk(s) failed transfer or verification."
+    log_msg "       VM configuration NOT copied to remote host."
+    log_msg "       Fix the failed disks and retry before starting the replica."
+    exit 1
+fi
+
+# --- Update Remote VM Configuration (only on full runs) ---
 if [ "$NEW_TYPE" = "full" ]; then
     update_remote_config
 else
